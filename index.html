@@ -1,0 +1,448 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#101827">
+<title>jus ai</title>
+<link rel="manifest" href="manifest.json">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<style>
+:root{color-scheme:dark;--bg:#101827;--panel:#1b2638;--line:#344158;--text:#f3f6fb;--muted:#aab7ca;--accent:#79a9ff}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:15px system-ui,Arial}
+header{padding:16px;background:#121d2d;border-bottom:1px solid var(--line);position:sticky;top:0;z-index:2}
+h1{font-size:21px;margin:0}small,.muted{color:var(--muted)}
+main{max-width:850px;margin:auto;padding:14px}
+nav{display:flex;gap:8px;overflow:auto;padding:12px 0}
+button,.filelabel{background:#26364e;color:white;border:1px solid var(--line);border-radius:10px;padding:10px 13px;font:inherit;cursor:pointer}
+button.primary{background:#2865c7;border-color:#2865c7}
+button:disabled{opacity:.5}
+nav button.active{background:#2865c7}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:14px;margin:10px 0}
+input,textarea,select{width:100%;background:#101827;color:white;border:1px solid var(--line);border-radius:10px;padding:12px;font:inherit}
+textarea{min-height:90px;resize:vertical}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.row>*{flex:1}
+#messages{display:flex;flex-direction:column;gap:10px;max-height:48vh;overflow:auto}
+.msg{padding:12px;border-radius:12px;white-space:pre-wrap;overflow-wrap:anywhere}
+.user{background:#263d5d;align-self:flex-end;max-width:92%}
+.assistant{background:#263142;align-self:flex-start;max-width:100%}
+#status{font-size:13px;color:var(--muted);padding:6px 0}
+.hidden{display:none!important}
+pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#0c1421;padding:12px;border-radius:9px;max-height:50vh;overflow:auto}
+label{display:block;margin:8px 0}
+</style>
+</head>
+<body>
+<header>
+  <h1>jus ai</h1>
+  <small>Your personal MBA tutor and app-building assistant</small>
+</header>
+<main>
+  <div class="panel">
+    <div id="status">Checking your device...</div>
+    <div class="row">
+      <button class="primary" id="loadBtn">Load local AI</button>
+      <button id="stopBtn">Stop voice</button>
+    </div>
+    <small id="progress">The first model download may be around 1 GB or more.</small>
+  </div>
+
+  <nav>
+    <button class="active" data-tab="tutor">MBA Tutor</button>
+    <button data-tab="documents">Documents</button>
+    <button data-tab="builder">App Builder</button>
+    <button data-tab="history">History</button>
+  </nav>
+
+  <section id="tutor" class="tab">
+    <div class="panel">
+      <div id="messages" aria-live="polite"></div>
+      <label for="question">Ask jus ai</label>
+      <textarea id="question" placeholder="Ask an MBA question..."></textarea>
+      <div class="row" style="margin-top:8px">
+        <button class="primary" id="sendBtn">Send</button>
+        <button id="micBtn">🎙 Speak</button>
+        <button id="clearBtn">Clear chat</button>
+      </div>
+      <small>Voice recognition uses your browser's speech service and may need internet.</small>
+    </div>
+  </section>
+
+  <section id="documents" class="tab hidden">
+    <div class="panel">
+      <h3>Read a document</h3>
+      <p class="muted">Upload a text-based PDF or Word document. Scanned PDFs need OCR, which is not included in this starter.</p>
+      <input type="file" id="docFile" accept=".pdf,.docx">
+      <div class="row" style="margin-top:10px">
+        <button class="primary" id="readDocBtn">Read document</button>
+        <button id="clearDocBtn">Remove document</button>
+      </div>
+      <div id="docStatus" class="muted"></div>
+      <textarea id="docText" placeholder="Extracted document text will appear here..." style="min-height:180px"></textarea>
+      <small>Document text is kept in this page's memory and can be included in your questions. Large files may need to be split into chapters.</small>
+    </div>
+  </section>
+
+  <section id="builder" class="tab hidden">
+    <div class="panel">
+      <h3>PWA App Builder</h3>
+      <p class="muted">Describe the app or paste code you want to improve. The local model will draft code and explain changes. It will not automatically publish to GitHub.</p>
+      <textarea id="buildRequest" placeholder="Example: Create a simple notes PWA with offline storage."></textarea>
+      <button class="primary" id="buildBtn" style="margin-top:8px">Generate app code</button>
+      <pre id="buildOutput">Your generated code will appear here.</pre>
+      <button id="copyBuildBtn">Copy generated output</button>
+    </div>
+  </section>
+
+  <section id="history" class="tab hidden">
+    <div class="panel">
+      <h3>Chat history</h3>
+      <button class="primary" id="monthsBtn">Load months</button>
+      <select id="monthSelect"><option value="">Choose a month</option></select>
+      <button id="historyBtn">Load selected month</button>
+      <div id="historyOutput" class="muted"></div>
+    </div>
+  </section>
+</main>
+
+<script type="module">
+import { CreateMLCEngine } from "https://esm.run/@mlc-ai/web-llm";
+
+const MODEL = "Llama-3.2-1B-Instruct-q4f16_1-MLC";
+const BACKEND = ""; // Paste your Apps Script /exec URL here.
+const MAX_DOC_CHARS = 18000;
+let engine = null;
+let busy = false;
+let docContext = "";
+let messages = [];
+let recognition = null;
+
+const $ = id => document.getElementById(id);
+const status = text => $("status").textContent = text;
+const progress = text => $("progress").textContent = text;
+
+function addMessage(role, content) {
+  messages.push({role, content});
+  const div = document.createElement("div");
+  div.className = "msg " + (role === "user" ? "user" : "assistant");
+  div.textContent = content;
+  $("messages").appendChild(div);
+  $("messages").scrollTop = $("messages").scrollHeight;
+}
+
+function saveHistory(role, message) {
+  if (!BACKEND) return;
+  fetch(BACKEND, {
+    method: "POST",
+    mode: "no-cors",
+    headers: {"Content-Type":"text/plain;charset=utf-8"},
+    body: JSON.stringify({role, message})
+  }).catch(() => {});
+}
+
+function speak(text) {
+  if (!("speechSynthesis" in window)) return;
+  speechSynthesis.cancel();
+  const utterance = new SpeechSynthesisUtterance(text);
+  utterance.lang = "en-IN";
+  speechSynthesis.speak(utterance);
+}
+
+async function loadAI() {
+  if (engine) return;
+  if (!navigator.gpu) {
+    status("WebGPU is not available in this browser.");
+    return;
+  }
+  try {
+    status("Checking WebGPU...");
+    const adapter = await navigator.gpu.requestAdapter();
+    if (!adapter) throw new Error("No compatible GPU adapter found.");
+    status("Loading local AI model...");
+    $("loadBtn").disabled = true;
+    engine = await CreateMLCEngine(MODEL, {
+      initProgressCallback: p => {
+        progress(p.text || "Downloading model...");
+      }
+    });
+    status("Local AI is ready.");
+    progress("Model loaded on your device.");
+  } catch (e) {
+    engine = null;
+    status("Could not load model: " + e.message);
+    progress("Check Chrome, WebGPU support, storage space, and internet.");
+  } finally {
+    $("loadBtn").disabled = false;
+  }
+}
+
+const SYSTEM = `You are jus ai, a helpful personal MBA tutor and PWA coding assistant.
+Explain concepts clearly with examples, structured steps, and practical applications.
+For MBA questions, teach management, marketing, finance, accounting, economics,
+operations, strategy, and organizational behavior. Show calculation steps when
+relevant. Do not invent facts or pretend to have read material that is not supplied.
+For app-building requests, produce practical code and explain which file it belongs in.
+Be honest about uncertainty and limitations.`;
+
+async function askAI(prompt, mode = "tutor") {
+  if (!engine) {
+    addMessage("assistant", "Please load the local AI model first.");
+    return "";
+  }
+  if (busy) return "";
+  busy = true;
+  $("sendBtn").disabled = true;
+  $("buildBtn").disabled = true;
+  try {
+    const context = docContext
+      ? "\n\nDOCUMENT EXCERPT (use only as source material where relevant):\n" + docContext
+      : "";
+    const recent = messages.slice(-8).map(m => ({
+      role: m.role,
+      content: m.content
+    }));
+    const promptMessages = [
+      {role:"system", content:SYSTEM + context + "\n\nCurrent mode: " + mode},
+      ...recent,
+      {role:"user", content:prompt}
+    ];
+    const result = await engine.chat.completions.create({
+      messages: promptMessages,
+      temperature: 0.4,
+      max_tokens: 900
+    });
+    return result.choices?.[0]?.message?.content || "I could not generate a response.";
+  } catch (e) {
+    return "AI error: " + e.message;
+  } finally {
+    busy = false;
+    $("sendBtn").disabled = false;
+    $("buildBtn").disabled = false;
+  }
+}
+
+async function sendQuestion() {
+  const input = $("question");
+  const prompt = input.value.trim();
+  if (!prompt) return;
+  input.value = "";
+  addMessage("user", prompt);
+  saveHistory("user", prompt);
+  const answer = await askAI(prompt);
+  if (answer) {
+    addMessage("assistant", answer);
+    saveHistory("assistant", answer);
+    speak(answer);
+  }
+}
+
+$("loadBtn").addEventListener("click", loadAI);
+$("sendBtn").addEventListener("click", sendQuestion);
+$("question").addEventListener("keydown", e => {
+  if (e.key === "Enter" && !e.shiftKey) {
+    e.preventDefault();
+    sendQuestion();
+  }
+});
+$("clearBtn").addEventListener("click", () => {
+  messages = [];
+  $("messages").replaceChildren();
+  speechSynthesis?.cancel();
+});
+$("stopBtn").addEventListener("click", () => {
+  if ("speechSynthesis" in window) speechSynthesis.cancel();
+  if (recognition) {
+    try { recognition.stop(); } catch {}
+  }
+});
+
+document.querySelectorAll("nav button").forEach(btn => {
+  btn.addEventListener("click", () => {
+    document.querySelectorAll("nav button").forEach(b => b.classList.remove("active"));
+    btn.classList.add("active");
+    document.querySelectorAll(".tab").forEach(t => t.classList.add("hidden"));
+    $(btn.dataset.tab).classList.remove("hidden");
+  });
+});
+
+// Voice input: browser speech recognition, usually requiring internet.
+$("micBtn").addEventListener("click", () => {
+  const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SpeechRecognition) {
+    alert("Speech recognition is not supported in this browser.");
+    return;
+  }
+  if (recognition) {
+    try { recognition.stop(); } catch {}
+  }
+  recognition = new SpeechRecognition();
+  recognition.lang = "en-IN";
+  recognition.continuous = false;
+  recognition.interimResults = false;
+  recognition.onstart = () => status("Listening...");
+  recognition.onresult = e => {
+    $("question").value = e.results[0][0].transcript;
+    status("Speech captured. Press Send.");
+  };
+  recognition.onerror = e => status("Voice error: " + e.error);
+  recognition.onend = () => {
+    if (engine) status("Local AI " + (busy ? "is working." : "is ready."));
+  };
+  try { recognition.start(); } catch (e) { status(e.message); }
+});
+
+// Load PDF.js and Mammoth only when the user opens a document.
+async function loadScript(src) {
+  return new Promise((resolve, reject) => {
+    const script = document.createElement("script");
+    script.src = src;
+    script.onload = resolve;
+    script.onerror = () => reject(new Error("Could not load document reader library."));
+    document.head.appendChild(script);
+  });
+}
+
+async function extractPDF(file) {
+  if (!window.pdfjsLib) {
+    await loadScript("https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js");
+    window.pdfjsLib.GlobalWorkerOptions.workerSrc =
+      "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+  }
+  const data = new Uint8Array(await file.arrayBuffer());
+  const pdf = await window.pdfjsLib.getDocument({data}).promise;
+  let output = "";
+  for (let i = 1; i <= pdf.numPages; i++) {
+    const page = await pdf.getPage(i);
+    const content = await page.getTextContent();
+    const line = content.items.map(item => item.str).join(" ");
+    output += "\n\n[Page " + i + "]\n" + line;
+    if (output.length >= MAX_DOC_CHARS) break;
+  }
+  return output;
+}
+
+async function extractDOCX(file) {
+  if (!window.mammoth) {
+    await loadScript("https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.8.0/mammoth.browser.min.js");
+  }
+  const result = await window.mammoth.extractRawText({arrayBuffer: await file.arrayBuffer()});
+  return result.value;
+}
+
+$("readDocBtn").addEventListener("click", async () => {
+  const file = $("docFile").files[0];
+  if (!file) {
+    $("docStatus").textContent = "Choose a PDF or DOCX file first.";
+    return;
+  }
+  try {
+    $("docStatus").textContent = "Extracting document text...";
+    let text;
+    if (file.name.toLowerCase().endsWith(".pdf")) text = await extractPDF(file);
+    else if (file.name.toLowerCase().endsWith(".docx")) text = await extractDOCX(file);
+    else throw new Error("Only PDF and DOCX files are supported.");
+    docContext = text.slice(0, MAX_DOC_CHARS);
+    $("docText").value = docContext;
+    $("docStatus").textContent = "Document loaded. " + docContext.length + " characters extracted.";
+    document.querySelector('[data-tab="tutor"]').click();
+    addMessage("assistant", "Your document is ready. Ask me questions about its contents.");
+  } catch (e) {
+    $("docStatus").textContent = "Could not read file: " + e.message;
+  }
+});
+
+$("clearDocBtn").addEventListener("click", () => {
+  docContext = "";
+  $("docText").value = "";
+  $("docFile").value = "";
+  $("docStatus").textContent = "Document removed.";
+});
+
+// Simple local app-code drafting assistant.
+$("buildBtn").addEventListener("click", async () => {
+  const request = $("buildRequest").value.trim();
+  if (!request) return;
+  $("buildOutput").textContent = "Generating...";
+  const answer = await askAI(
+    "Create or improve a Progressive Web App based on this request:\n" + request +
+    "\nGive complete code, label each filename, and include setup instructions. " +
+    "If editing existing code, ask for it when it has not been provided.",
+    "PWA App Builder"
+  );
+  $("buildOutput").textContent = answer || "No output generated.";
+});
+$("copyBuildBtn").addEventListener("click", async () => {
+  try {
+    await navigator.clipboard.writeText($("buildOutput").textContent);
+    alert("Copied.");
+  } catch { alert("Copy is not available. Select and copy the text manually."); }
+});
+
+// Google Apps Script history: JSONP GET.
+function jsonp(url) {
+  return new Promise((resolve, reject) => {
+    const callback = "jusCallback" + Math.random().toString(36).slice(2);
+    const script = document.createElement("script");
+    const timer = setTimeout(() => {
+      cleanup();
+      reject(new Error("History request timed out."));
+    }, 15000);
+    function cleanup() {
+      clearTimeout(timer);
+      delete window[callback];
+      script.remove();
+    }
+    window[callback] = data => {
+      cleanup();
+      resolve(data);
+    };
+    script.onerror = () => {
+      cleanup();
+      reject(new Error("Could not load history."));
+    };
+    script.src = url + (url.includes("?") ? "&" : "?") +
+      "callback=" + callback + "&_=" + Date.now();
+    document.body.appendChild(script);
+  });
+}
+
+$("monthsBtn").addEventListener("click", async () => {
+  if (!BACKEND) return alert("Add your Apps Script URL in index.html first.");
+  try {
+    const data = await jsonp(BACKEND + "?action=months");
+    const select = $("monthSelect");
+    select.replaceChildren(new Option("Choose a month", ""));
+    (data.months || []).forEach(m => select.add(new Option(m, m)));
+    $("historyOutput").textContent = "Months loaded.";
+  } catch (e) {
+    $("historyOutput").textContent = e.message;
+  }
+});
+
+$("historyBtn").addEventListener("click", async () => {
+  if (!BACKEND) return alert("Add your Apps Script URL in index.html first.");
+  const month = $("monthSelect").value;
+  if (!month) return;
+  try {
+    const data = await jsonp(BACKEND + "?action=history&month=" + encodeURIComponent(month));
+    $("historyOutput").textContent = (data.rows || [])
+      .map(r => "[" + r.date + "] " + r.role + ": " + r.message)
+      .join("\n\n") || "No messages for this month.";
+  } catch (e) {
+    $("historyOutput").textContent = e.message;
+  }
+});
+
+if ("serviceWorker" in navigator) {
+  window.addEventListener("load", () => {
+    navigator.serviceWorker.register("./sw.js").catch(() => {});
+  });
+}
+status(navigator.gpu ? "WebGPU detected. Load the local AI model." :
+  "WebGPU not detected. Check Chrome and device support.");
+</script>
+</body>
+</html>
